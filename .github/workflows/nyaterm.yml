@@ -26,6 +26,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # rust-toolchain.toml pins the toolchain but declares no components, and a
+      # runner installs it with the minimal profile, so rustfmt is absent:
+      #   error: 'cargo-fmt' is not installed for the toolchain '1.91.0-...'
+      # Added here rather than in rust-toolchain.toml to keep upstream's file
+      # untouched and the patch series rebasable.
+      - name: Install rustfmt
+        run: rustup component add rustfmt
+
       - name: Formatting
         run: cargo fmt --all -- --check
 

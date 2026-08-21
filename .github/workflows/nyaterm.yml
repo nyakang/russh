@@ -1,0 +1,39 @@
+name: NyaTerm branch
+
+# Upstream's rust.yml only triggers on `main`, so nothing ran on this branch.
+# This branch carries no library change of its own any more, but NyaTerm compiles
+# the exact revision it points at, so fmt and the library tests still have to be
+# green here rather than only on upstream's `main`.
+#
+# Triggers on this branch only, and lives in its own file rather than editing
+# upstream's workflow, so rebasing the patch series onto a newer upstream never
+# conflicts over CI configuration.
+
+on:
+  push:
+    branches: ["nyaterm"]
+  pull_request:
+    branches: ["nyaterm"]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  validate:
+    name: fmt, test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Formatting
+        run: cargo fmt --all -- --check
+
+      - name: Library tests
+        run: cargo test -p russh --lib
+
+# rust-toolchain.toml pins the toolchain, so rustup selects it automatically.
+#
+# clippy is deliberately not enforced: `cargo clippy -p russh --all-targets
+# -D warnings` already fails on the base revision in russh/src/tests.rs, which
+# this branch does not touch.

@@ -1427,13 +1427,18 @@ impl Session {
                     if let Some(ref mut enc) = self.common.encrypted
                         && matches!(enc.state, EncryptedState::Authenticated)
                     {
-                        self.common.alive_timeouts = self.common.alive_timeouts.saturating_add(1);
-                        if self.common.config.keepalive_max != 0 && self.common.alive_timeouts > self.common.config.keepalive_max {
-                            debug!("Timeout, server not responding to keepalives");
-                            return Err(crate::Error::KeepaliveTimeout.into());
+                        let strict = self.common.config.keepalive_mode == KeepaliveMode::Strict;
+                        if strict {
+                            self.common.alive_timeouts = self.common.alive_timeouts.saturating_add(1);
+                            if self.common.config.keepalive_max != 0
+                                && self.common.alive_timeouts > self.common.config.keepalive_max
+                            {
+                                debug!("Timeout, server not responding to keepalives");
+                                return Err(crate::Error::KeepaliveTimeout.into());
+                            }
                         }
                         sent_keepalive = true;
-                        self.send_keepalive(true)?;
+                        self.send_keepalive(strict)?;
                     }
                 }
                 () = &mut inactivity_timer => {
@@ -2423,6 +2428,17 @@ mod tests {
         session
     }
 
+    #[test]
+    fn no_reply_keepalives_do_not_shift_the_global_response_queue() {
+        let (mut session, _, _) = keyboard_interactive_session();
+        session.send_keepalive(false).unwrap();
+        assert!(session.open_global_requests.is_empty());
+        assert_eq!(session.common.encrypted.as_ref().unwrap().write.last(), Some(&0));
+        session.send_keepalive(true).unwrap();
+        assert_eq!(session.open_global_requests.len(), 1);
+        assert_eq!(session.common.encrypted.as_ref().unwrap().write.last(), Some(&1));
+    }
+
     fn oversized_prompt_count_packet() -> Vec<u8> {
         let mut packet = Vec::new();
         msg::USERAUTH_INFO_REQUEST_OR_USERAUTH_PK_OK
@@ -2638,6 +2654,16 @@ impl Default for GexParams {
     }
 }
 
+/// Automatic keepalive policy. Compatible probes do not require a reply.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum KeepaliveMode {
+    /// Preserve upstream missed-reply timeout behaviour.
+    #[default]
+    Strict,
+    /// Keep idle links active without disconnecting peers that ignore probes.
+    Compatible,
+}
+
 /// The configuration of clients.
 #[derive(Debug)]
 pub struct Config {
@@ -2659,6 +2685,8 @@ pub struct Config {
     pub keepalive_interval: Option<std::time::Duration>,
     /// If this many keepalives have been sent without reply, close the connection.
     pub keepalive_max: usize,
+    /// Policy for automatic keepalive requests.
+    pub keepalive_mode: KeepaliveMode,
     /// Whether to expect and wait for an authentication call.
     pub anonymous: bool,
     /// DH dynamic group exchange parameters.
@@ -2684,6 +2712,7 @@ impl Default for Config {
             inactivity_timeout: None,
             keepalive_interval: None,
             keepalive_max: 3,
+            keepalive_mode: KeepaliveMode::Strict,
             anonymous: false,
             gex: Default::default(),
             nodelay: false,

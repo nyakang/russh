@@ -1,8 +1,8 @@
 # NyaTerm fork notes
 
-This branch tracks an unmodified upstream `russh` and adds only CI, so
+This branch tracks upstream `russh` with the patches documented below, so
 [NyaTerm](https://github.com/nyakang/nyaterm) compiles a revision that has been
-verified. It carries no library change of its own any more.
+verified.
 
 - Fork: <https://github.com/nyakang/russh>
 - Upstream: <https://github.com/warp-tech/russh>
@@ -12,7 +12,19 @@ verified. It carries no library change of its own any more.
 
 ## Patches
 
-None. The branch is upstream plus `.github/workflows/nyaterm.yml` and this file.
+- Add `client::KeepaliveMode::{Strict, Compatible}`. Strict preserves upstream;
+  Compatible sends no-reply probes and does not close appliances that ignore them.
+- No-reply keepalives must not enqueue global-response slots, which would otherwise
+  misattribute a later forwarded-port or ping response.
+- Regression coverage checks the wire reply flag and global-response queue.
+- Patch validation on Windows: rustfmt check passed; library tests excluding the
+  known baseline compression failure: 166 passed. The new keepalive regression
+  also passes independently.
+- Full library run: 166 passed, 1 failed (`compression::tests::partial_flush_packets_round_trip`).
+  The same test fails on unchanged `cf257f6` with the identical generated lockfile
+  and stable toolchain (0 passed, 1 failed when filtered). This patch does not
+  change compression. Record this baseline failure rather than claiming a green
+  full upstream suite.
 
 ## Not carried here
 

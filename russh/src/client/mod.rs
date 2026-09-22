@@ -620,10 +620,7 @@ impl<H: Handler> Handle<H> {
                 Msg::AuthGssapiExchangeComplete { token }
             }
         };
-        self.sender
-            .send(msg)
-            .await
-            .map_err(|_| crate::SendError {})
+        self.sender.send(msg).await.map_err(|_| crate::SendError {})
     }
 
     /// Authenticate using a certificate with a custom signer that implements the
@@ -1086,6 +1083,7 @@ pub async fn connect<H: Handler + Send + 'static, A: tokio::net::ToSocketAddrs>(
     handler: H,
 ) -> Result<Handle<H>, H::Error> {
     let socket = map_err!(tokio::net::TcpStream::connect(addrs).await)?;
+    #[allow(clippy::collapsible_if)]
     if config.as_ref().nodelay {
         if let Err(e) = socket.set_nodelay(true) {
             warn!("set_nodelay() failed: {e:?}");
@@ -1340,16 +1338,21 @@ impl Session {
                     reading.set(start_reading(stream_read, buffer, opening_cipher));
                 }
                 () = &mut keepalive_timer => {
-                    if let Some(ref mut enc) = self.common.encrypted {
-                        if matches!(enc.state, EncryptedState::Authenticated) {
+                    if let Some(ref mut enc) = self.common.encrypted
+                        && matches!(enc.state, EncryptedState::Authenticated)
+                    {
+                        let strict = self.common.config.keepalive_mode == KeepaliveMode::Strict;
+                        if strict {
                             self.common.alive_timeouts = self.common.alive_timeouts.saturating_add(1);
-                            if self.common.config.keepalive_mode == KeepaliveMode::Strict && self.common.config.keepalive_max != 0 && self.common.alive_timeouts > self.common.config.keepalive_max {
+                            if self.common.config.keepalive_max != 0
+                                && self.common.alive_timeouts > self.common.config.keepalive_max
+                            {
                                 debug!("Timeout, server not responding to keepalives");
                                 return Err(crate::Error::KeepaliveTimeout.into());
                             }
-                            sent_keepalive = true;
-                            self.send_keepalive(self.common.config.keepalive_mode == KeepaliveMode::Strict)?;
                         }
+                        sent_keepalive = true;
+                        self.send_keepalive(strict)?;
                     }
                 }
                 () = &mut inactivity_timer => {
@@ -1403,16 +1406,21 @@ impl Session {
             };
 
             self.flush()?;
-            map_err!(self.common.packet_writer.flush_into(stream_write).await)?;
+            crate::flush_or_timeout(
+                &mut self.common.packet_writer,
+                stream_write,
+                inactivity_timer.as_mut(),
+            )
+            .await?;
 
-            if let Some(ref mut enc) = self.common.encrypted {
-                if let EncryptedState::InitCompression = enc.state {
-                    if enc.client_compression.is_deferred() {
-                        enc.client_compression
-                            .init_compress(self.common.packet_writer.compress());
-                    }
-                    enc.state = EncryptedState::Authenticated;
+            if let Some(ref mut enc) = self.common.encrypted
+                && let EncryptedState::InitCompression = enc.state
+            {
+                if enc.client_compression.is_deferred() {
+                    enc.client_compression
+                        .init_compress(self.common.packet_writer.compress());
                 }
+                enc.state = EncryptedState::Authenticated;
             }
 
             if self.common.received_data {
@@ -1423,21 +1431,21 @@ impl Session {
                 // data from it.
                 self.common.alive_timeouts = 0;
             }
-            if self.common.received_data || sent_keepalive {
-                if let (futures::future::Either::Right(ref mut sleep), Some(d)) = (
+            if (self.common.received_data || sent_keepalive)
+                && let (futures::future::Either::Right(ref mut sleep), Some(d)) = (
                     keepalive_timer.as_mut().as_pin_mut(),
                     self.common.config.keepalive_interval,
-                ) {
-                    sleep.as_mut().reset(tokio::time::Instant::now() + d);
-                }
+                )
+            {
+                sleep.as_mut().reset(tokio::time::Instant::now() + d);
             }
-            if !sent_keepalive {
-                if let (futures::future::Either::Right(ref mut sleep), Some(d)) = (
+            if !sent_keepalive
+                && let (futures::future::Either::Right(ref mut sleep), Some(d)) = (
                     inactivity_timer.as_mut().as_pin_mut(),
                     self.common.config.inactivity_timeout,
-                ) {
-                    sleep.as_mut().reset(tokio::time::Instant::now() + d);
-                }
+                )
+            {
+                sleep.as_mut().reset(tokio::time::Instant::now() + d);
             }
         }
 
@@ -1716,6 +1724,7 @@ impl Session {
 
     fn begin_rekey(&mut self) -> Result<(), crate::Error> {
         debug!("beginning re-key");
+        self.pending_len = 0;
         let mut kex = ClientKex::new(
             self.common.config.clone(),
             &self.common.config.client_id,
@@ -1738,9 +1747,13 @@ impl Session {
     /// buffer. This does *not* flush to the socket.
     fn flush(&mut self) -> Result<(), crate::Error> {
         if let Some(ref mut enc) = self.common.encrypted {
+            // Tearing down: get the queued packets (incl. DISCONNECT) out in
+            // order, kex or not.
+            let is_rekeying = self.kex.active() && !self.common.disconnected;
             if enc.flush(
                 &self.common.config.as_ref().limits,
                 &mut self.common.packet_writer,
+                is_rekeying,
             )? && !self.kex.active()
             {
                 self.begin_rekey()?;
@@ -1794,6 +1807,39 @@ async fn reply<H: Handler>(
 
     let is_kex_msg = pkt.buffer.first().cloned().map(is_kex_msg).unwrap_or(false);
 
+    // RFC 4253 s7.1: after a KEXINIT, only transport (1-19) and kex (20-49)
+    // messages may flow until NEWKEYS. Non-transport messages (>= 50: auth and
+    // channel traffic) are the DoS vector -- their replies queue on an
+    // unbounded channel that is not drained until the rekey the peer may never
+    // finish completes.
+    //
+    //   * Once the PEER's own KEXINIT has arrived, nothing of theirs is
+    //     legitimately still in flight, so such a message is a protocol
+    //     violation -- reject it.
+    //   * Before it arrives (we initiated the rekey; the peer may not have seen
+    //     our KEXINIT yet) their in-flight messages are legal. Handle them as
+    //     usual, but bound the total so a peer that stalls the rekey and floods
+    //     cannot grow memory without limit. `pending_len` is reset when the
+    //     rekey completes (see `begin_rekey` and the kex-done path).
+    #[allow(clippy::collapsible_if)]
+    if !is_kex_msg && session.common.encrypted.is_some() {
+        if let (Some(&msg_type), SessionKexState::InProgress(kex)) =
+            (pkt.buffer.first(), &session.kex)
+        {
+            if msg_type >= msg::USERAUTH_REQUEST {
+                if kex.peer_kexinit_received() {
+                    return Err(crate::Error::Inconsistent.into());
+                }
+                session.pending_len = session.pending_len.saturating_add(pkt.buffer.len() as u32);
+                if u64::from(session.pending_len) > 2 * u64::from(session.common.config.window_size)
+                {
+                    return Err(crate::Error::Pending.into());
+                }
+            }
+        }
+    }
+
+    #[allow(clippy::collapsible_if)]
     if is_kex_msg {
         if let SessionKexState::InProgress(kex) = session.kex.take() {
             let progress = kex.step(Some(pkt), &mut session.common.packet_writer)?;
@@ -1830,7 +1876,10 @@ async fn reply<H: Handler>(
                             common.packet_writer.buffer().bytes = 0;
                             if let Some(enc) = common.encrypted.as_mut() {
                                 enc.last_rekey = Instant::now();
-                                enc.flush_all_pending_with_writer(&mut common.packet_writer)?;
+                                enc.flush_all_pending_with_writer(
+                                    &mut common.packet_writer,
+                                    false,
+                                )?;
                             }
                         }
 
@@ -1910,7 +1959,10 @@ mod tests {
     impl Handler for TestHandler {
         type Error = crate::Error;
 
-        async fn check_server_key(&mut self, _: &PublicKeyOrCertificate) -> Result<bool, Self::Error> {
+        async fn check_server_key(
+            &mut self,
+            _: &PublicKeyOrCertificate,
+        ) -> Result<bool, Self::Error> {
             Ok(true)
         }
     }

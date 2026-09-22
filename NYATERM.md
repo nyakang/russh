@@ -6,8 +6,8 @@ verified.
 
 - Fork: <https://github.com/nyakang/russh>
 - Upstream: <https://github.com/warp-tech/russh>
-- Base revision: `d3ae702a43a163946f258297e398dc216339d5ce` (the `v0.63.1`
-  release commit)
+- Base revision: `d49f3e7a4d674beeeac7fdd1f0e7b49352bef488`
+  (upstream `main` on 2026-09-22)
 - Branch: `nyaterm`
 
 ## Patches
@@ -17,14 +17,6 @@ verified.
 - No-reply keepalives must not enqueue global-response slots, which would otherwise
   misattribute a later forwarded-port or ping response.
 - Regression coverage checks the wire reply flag and global-response queue.
-- Patch validation on Windows: rustfmt check passed; library tests excluding the
-  known baseline compression failure: 166 passed. The new keepalive regression
-  also passes independently.
-- Full library run: 166 passed, 1 failed (`compression::tests::partial_flush_packets_round_trip`).
-  The same test fails on unchanged `cf257f6` with the identical generated lockfile
-  and stable toolchain (0 passed, 1 failed when filtered). This patch does not
-  change compression. Record this baseline failure rather than claiming a green
-  full upstream suite.
 
 ## Not carried here
 
@@ -49,5 +41,11 @@ On Windows 11, with the toolchain `rust-toolchain.toml` pins (1.91.0):
 
 ```sh
 cargo fmt --all -- --check   # clean
-cargo test -p russh --lib    # 166 passed
+cargo test -p russh --lib    # 175 passed
 ```
+
+The 2026-09-22 merge to `d49f3e7a4d` conflicted only in
+`russh/src/client/mod.rs`. The resolution keeps upstream's current session loop
+and timer reset structure. Strict mode requests replies, counts missed probes,
+and enforces `keepalive_max`; Compatible mode sends no-reply probes without
+incrementing the timeout counter or adding a global-response queue entry.

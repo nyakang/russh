@@ -6,8 +6,8 @@ verified.
 
 - Fork: <https://github.com/nyakang/russh>
 - Upstream: <https://github.com/warp-tech/russh>
-- Base revision: `d49f3e7a4d674beeeac7fdd1f0e7b49352bef488`
-  (upstream `main` on 2026-09-22)
+- Base revision: `efa9a03e541b69505d5e6ec0d9213d011c9f6310`
+  (upstream `main` on 2026-10-01)
 - Branch: `nyaterm`
 
 ## Patches
@@ -49,3 +49,10 @@ The 2026-09-22 merge to `d49f3e7a4d` conflicted only in
 and timer reset structure. Strict mode requests replies, counts missed probes,
 and enforces `keepalive_max`; Compatible mode sends no-reply probes without
 incrementing the timeout counter or adding a global-response queue entry.
+
+## 2026-10-01 upstream merge
+
+Merged upstream main without content conflicts. Host-key ownership proof and
+Pageant principal fixes coexist with the Strict/Compatible keepalive patch.
+Windows validation: `cargo test -p russh --lib` (181 passed) and
+`cargo fmt --all -- --check` passed with the pinned Rust 1.91.0 toolchain.
